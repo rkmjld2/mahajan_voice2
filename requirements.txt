@@ -1,0 +1,12 @@
+streamlit
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community
+langchain-groq
+langchain-text-splitters
+pypdf  # optional fallback if needed
+faiss-cpu
+gtts
+sentence-transformers
+torch
+groq>=0.5.0  # ← added for Groq client (includes audio transcription support)
