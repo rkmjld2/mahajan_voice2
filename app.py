@@ -10,17 +10,14 @@ from langchain_core.runnables import RunnablePassthrough
 from gtts import gTTS
 import tempfile
 import os
-from groq import Groq  # Official Groq client for Whisper transcription
+from groq import Groq
 
 st.title("📄 RAG PDF Voice Assistant (Groq)")
 st.info("Upload PDF → Ask via text or 🎤 voice → Get text + spoken answer.")
 
-# ────────────────────────────────────────────────
-# Secrets & Clients
-# ────────────────────────────────────────────────
+# Clients & Session
 groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
-# Session state for vectorstore (persist across reruns)
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 
@@ -28,22 +25,22 @@ uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
 
 if uploaded_file is not None:
     pdf_bytes = uploaded_file.read()
+    st.write(f"PDF uploaded - size: {len(pdf_bytes)} bytes")
 
     if len(pdf_bytes) < 200:
-        st.error("Uploaded file is empty or too small.")
+        st.error("File too small.")
     else:
         try:
-            with st.spinner("Loading PDF from memory..."):
+            with st.spinner("Loading PDF..."):
                 doc = fitz.open(stream=pdf_bytes, filetype="pdf")
                 docs_list = []
                 for page_num in range(len(doc)):
                     text = doc[page_num].get_text("text")
-                    metadata = {"source": uploaded_file.name or "uploaded.pdf", "page": page_num + 1}
-                    docs_list.append(Document(page_content=text, metadata=metadata))
+                    docs_list.append(Document(page_content=text, metadata={"page": page_num + 1}))
                 doc.close()
 
-                if not docs_list or all(len(d.page_content.strip()) == 0 for d in docs_list):
-                    st.warning("No readable text extracted (possibly scanned/image-only PDF).")
+                if not docs_list:
+                    st.warning("No text extracted.")
                 else:
                     text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=120)
                     splits = text_splitter.split_documents(docs_list)
@@ -51,16 +48,12 @@ if uploaded_file is not None:
                     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
                     vectorstore = FAISS.from_documents(splits, embeddings)
                     st.session_state.vectorstore = vectorstore
-                    st.success(f"PDF ready! {len(docs_list)} pages processed.")
-
+                    st.success(f"PDF ready! {len(docs_list)} pages.")
         except Exception as e:
-            st.error(f"PDF processing failed: {str(e)}")
+            st.error(f"PDF load error: {str(e)}")
 
-# ────────────────────────────────────────────────
-# Query section — only if PDF loaded
-# ────────────────────────────────────────────────
+# ── If PDF loaded ──
 if st.session_state.vectorstore is not None:
-
     retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 4})
 
     llm = ChatGroq(
@@ -70,7 +63,7 @@ if st.session_state.vectorstore is not None:
     )
 
     prompt = ChatPromptTemplate.from_template(
-        """Answer based only on the provided context. Be concise and accurate.
+        """Answer based only on the context. Be concise.
 
         Context:
         {context}
@@ -89,53 +82,55 @@ if st.session_state.vectorstore is not None:
         | llm
     )
 
-    # ── Input: Text or Voice (microphone) ──
+    # ── Input ──
     user_input = st.chat_input(
-        placeholder="Ask about the PDF (type or click mic 🎤 to speak)...",
+        "Ask about the PDF (type or mic)...",
         accept_audio=True
     )
 
     if user_input:
+        st.write("Input received!")  # Debug: confirm input detected
 
         question = ""
 
         if isinstance(user_input, str):
-            # Plain text input
             question = user_input.strip()
+            st.write(f"Text input: '{question}'")
 
         elif isinstance(user_input, dict) and "audio" in user_input:
-            # Voice input recorded
-            audio_upload = user_input["audio"]  # Streamlit UploadedFile-like object
+            audio_upload = user_input.get("audio")
             if audio_upload:
                 audio_bytes = audio_upload.read()
+                st.write(f"Audio received - size: {len(audio_bytes)} bytes")
 
-                with st.spinner("Transcribing your voice using Groq Whisper..."):
+                with st.spinner("Transcribing voice (Groq Whisper)..."):
                     try:
-                        # Use Groq's OpenAI-compatible Whisper endpoint
-                        transcription = groq_client.audio.transcriptions.create(
-                            file=("audio.wav", audio_bytes, "audio/wav"),
-                            model="whisper-large-v3-turbo",  # fast & good balance (or "whisper-large-v3")
+                        # Correct file= format: tuple (filename, bytes, mime)
+                        transcription_resp = groq_client.audio.transcriptions.create(
+                            file=("audio_from_streamlit.wav", audio_bytes, "audio/wav"),
+                            model="whisper-large-v3-turbo",
                             response_format="text",
-                            language="en"  # optional: force English; remove for auto-detect
+                            language="en"
                         )
-                        question = transcription.strip()
-                        st.caption(f"**You said:** {question}")
+                        question = transcription_resp.strip() if transcription_resp else ""
+                        st.caption(f"You said (transcribed): **{question}**")
 
-                    except Exception as trans_e:
-                        st.error(f"Voice transcription failed: {str(trans_e)}")
+                        if not question:
+                            st.warning("Transcription returned empty string.")
+                    except Exception as trans_err:
+                        st.error(f"Transcription failed: {str(trans_err)}")
                         question = ""
 
         if question:
+            st.write(f"Processing question: '{question}'")
             with st.spinner("Generating answer..."):
                 try:
                     response = rag_chain.invoke(question)
                     answer_text = response.content.strip()
-
                     st.subheader("Answer")
                     st.markdown(answer_text)
 
-                    # Spoken output
-                    with st.spinner("Preparing voice answer..."):
+                    with st.spinner("Voice answer..."):
                         tts = gTTS(text=answer_text, lang='en')
                         audio_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
                         tts.save(audio_tmp.name)
@@ -144,22 +139,12 @@ if st.session_state.vectorstore is not None:
                         st.audio(audio_path, format="audio/mp3")
 
                         with open(audio_path, "rb") as af:
-                            st.download_button(
-                                label="Download spoken answer (MP3)",
-                                data=af,
-                                file_name="answer.mp3",
-                                mime="audio/mp3"
-                            )
+                            st.download_button("Download MP3", af, "answer.mp3", "audio/mp3")
 
-                except Exception as e:
-                    st.error(f"Error generating answer: {str(e)}")
-
-            # Cleanup
-            if 'audio_path' in locals() and os.path.exists(audio_path):
-                try:
-                    os.unlink(audio_path)
-                except:
-                    pass
+                except Exception as gen_err:
+                    st.error(f"Answer generation failed: {str(gen_err)}")
+        else:
+            st.info("No valid question after processing (empty transcription or input). Try again.")
 
 else:
-    st.info("Upload a PDF first to enable questions (text or voice).")
+    st.info("Upload PDF first.")
