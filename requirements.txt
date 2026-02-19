@@ -10,3 +10,6 @@ sentence-transformers
 torch
 groq>=0.5.0
 PyMuPDF>=1.23.0   # ← this line is critical
+beautifulsoup4
+lxml
+
